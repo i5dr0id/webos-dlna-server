@@ -4,6 +4,7 @@ var fs = require('fs');
 var path = require('path');
 var os = require('os');
 var url = require('url');
+var spawn = require('child_process').spawn;
 
 var PORT = 9000;
 var SSDP_ADDR = '239.255.255.250';
@@ -107,7 +108,7 @@ function resolveIdToPath(id) {
   for (var i = 0; i < roots.length; i++) {
     var p = idToPath(id, roots[i]);
     if (p && p.indexOf(roots[i]) === 0) {
-      try { fs.statSync(p); return p; } catch (e) {}
+      try { fs.accessSync(p); return p; } catch (e) {}
     }
   }
   return null;
@@ -254,7 +255,14 @@ function browseDirectChildren(objectID, start, count, usbRoot) {
     var id = pathToId(fullPath, effectiveRoot);
     var parentId = objectID;
 
-    if (statOk && stat.isDirectory()) {
+    var isDir = false;
+    if (statOk) {
+      isDir = stat.isDirectory();
+    } else {
+      try { fs.readdirSync(fullPath); isDir = true; } catch (e) { isDir = false; }
+    }
+
+    if (isDir) {
       items.push({
         id: id, parentId: parentId, title: entries[i],
         isDir: true, upnpClass: 'object.container.storageFolder'
@@ -265,6 +273,12 @@ function browseDirectChildren(objectID, start, count, usbRoot) {
       if (!upnpClass) continue;
       var mime = MIME_MAP[ext] || 'application/octet-stream';
       var fileSize = (statOk && stat) ? stat.size : 0;
+      if (!fileSize) {
+        try {
+          var so = execSync('stat -c %s ' + JSON.stringify(fullPath), { timeout: 3000 });
+          fileSize = parseInt(so.toString().trim(), 10) || 0;
+        } catch (e) {}
+      }
       var item = {
         id: id, parentId: parentId, title: entries[i],
         isDir: false, upnpClass: upnpClass,
@@ -745,7 +759,10 @@ var server = http.createServer(function (req, res) {
     var ext2 = getExt(filePath);
     var mime2 = MIME_MAP[ext2] || 'application/octet-stream';
 
-    // Range request support
+    // Check if Node can open this file (fails on >2GB files on this Node build)
+    var canOpen = true;
+    try { var testFd = fs.openSync(filePath, 'r'); fs.closeSync(testFd); } catch (e) { canOpen = false; }
+
     var range = req.headers.range;
     var features = dlnaFeatures(mime2);
     if (range) {
@@ -754,7 +771,6 @@ var server = http.createServer(function (req, res) {
       var rangeEnd = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
       if (rangeEnd >= fileSize) rangeEnd = fileSize - 1;
       var chunkSize = rangeEnd - rangeStart + 1;
-      var stream = fs.createReadStream(filePath, { start: rangeStart, end: rangeEnd });
       res.writeHead(206, {
         'Content-Range': 'bytes ' + rangeStart + '-' + rangeEnd + '/' + fileSize,
         'Accept-Ranges': 'bytes',
@@ -763,7 +779,13 @@ var server = http.createServer(function (req, res) {
         'transferMode.dlna.org': 'Streaming',
         'contentFeatures.dlna.org': features
       });
-      stream.pipe(res);
+      if (canOpen) {
+        fs.createReadStream(filePath, { start: rangeStart, end: rangeEnd }).pipe(res);
+      } else {
+        var sh = spawn('sh', ['-c', 'dd if=' + JSON.stringify(filePath) + ' bs=65536 skip=' + rangeStart + ' iflag=skip_bytes 2>/dev/null | head -c ' + chunkSize], { stdio: ['ignore', 'pipe', 'ignore'] });
+        sh.stdout.pipe(res);
+        res.on('close', function () { sh.kill(); });
+      }
     } else {
       res.writeHead(200, {
         'Content-Length': fileSize,
@@ -772,13 +794,23 @@ var server = http.createServer(function (req, res) {
         'transferMode.dlna.org': 'Streaming',
         'contentFeatures.dlna.org': features
       });
-      fs.createReadStream(filePath).pipe(res);
+      if (canOpen) {
+        fs.createReadStream(filePath).pipe(res);
+      } else {
+        var cat = spawn('cat', [filePath], { stdio: ['ignore', 'pipe', 'ignore'] });
+        cat.stdout.pipe(res);
+        res.on('close', function () { cat.kill(); });
+      }
     }
     return;
   }
 
   res.writeHead(404);
   res.end('Not found');
+});
+
+process.on('uncaughtException', function (err) {
+  console.error('Uncaught:', err.message);
 });
 
 server.listen(PORT, function () {
