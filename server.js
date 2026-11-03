@@ -248,12 +248,13 @@ function browseDirectChildren(objectID, start, count, usbRoot) {
     if (entries[i].charAt(0) === '.') continue;
     var fullPath = path.join(dirPath, entries[i]);
     var stat;
-    try { stat = fs.statSync(fullPath); } catch (e) { continue; }
+    var statOk = true;
+    try { stat = fs.statSync(fullPath); } catch (e) { stat = null; statOk = false; }
 
     var id = pathToId(fullPath, effectiveRoot);
     var parentId = objectID;
 
-    if (stat.isDirectory()) {
+    if (statOk && stat.isDirectory()) {
       items.push({
         id: id, parentId: parentId, title: entries[i],
         isDir: true, upnpClass: 'object.container.storageFolder'
@@ -263,10 +264,11 @@ function browseDirectChildren(objectID, start, count, usbRoot) {
       var upnpClass = getUpnpClass(ext);
       if (!upnpClass) continue;
       var mime = MIME_MAP[ext] || 'application/octet-stream';
+      var fileSize = (statOk && stat) ? stat.size : 0;
       var item = {
         id: id, parentId: parentId, title: entries[i],
         isDir: false, upnpClass: upnpClass,
-        mime: mime, size: stat.size,
+        mime: mime, size: fileSize,
         url: BASE_URL + '/media/' + encodeURIComponent(id)
       };
       if (VIDEO_EXT.indexOf(ext) !== -1 || AUDIO_EXT.indexOf(ext) !== -1) {
@@ -595,18 +597,25 @@ var server = http.createServer(function (req, res) {
       }
 
       var soapAction = req.headers['soapaction'] || '';
-      console.log('SOAP: ' + soapAction);
 
       if (soapAction.indexOf('Browse') !== -1) {
         var args = parseSoapAction(body);
         var objectID = args.ObjectID || '0';
         var startIdx = args.StartingIndex || 0;
         var reqCount = args.RequestedCount || 0;
+        console.log('Browse: ' + args.BrowseFlag + ' id=' + objectID);
 
         if (args.BrowseFlag === 'BrowseMetadata') {
-          var metaPath = idToPath(objectID, usbRoot);
           var isRoot = objectID === '0';
-          var title = isRoot ? SERVER_NAME : path.basename(metaPath);
+          var title;
+          if (isRoot) {
+            title = SERVER_NAME;
+          } else if (objectID.indexOf('root:') === 0) {
+            title = objectID.substring(5);
+          } else {
+            var metaPath = resolveIdToPath(objectID);
+            title = metaPath ? path.basename(metaPath) : objectID;
+          }
           var didl = '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
             + 'xmlns:dc="http://purl.org/dc/elements/1.1/" '
             + 'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">'
@@ -632,12 +641,12 @@ var server = http.createServer(function (req, res) {
         });
         res.writeHead(200, { 'Content-Type': 'text/xml; charset="utf-8"' });
         res.end(respBody);
-      } else if (soapAction.indexOf('GetSystemUpdateID') !== -1) {
-        res.writeHead(200, { 'Content-Type': 'text/xml; charset="utf-8"' });
-        res.end(soapResponse('GetSystemUpdateID', { Id: 1 }));
       } else if (soapAction.indexOf('GetSearchCapabilities') !== -1) {
         res.writeHead(200, { 'Content-Type': 'text/xml; charset="utf-8"' });
         res.end(soapResponse('GetSearchCapabilities', { SearchCaps: '' }));
+      } else if (soapAction.indexOf('GetSystemUpdateID') !== -1) {
+        res.writeHead(200, { 'Content-Type': 'text/xml; charset="utf-8"' });
+        res.end(soapResponse('GetSystemUpdateID', { Id: 1 }));
       } else if (soapAction.indexOf('GetSortCapabilities') !== -1) {
         res.writeHead(200, { 'Content-Type': 'text/xml; charset="utf-8"' });
         res.end(soapResponse('GetSortCapabilities', { SortCaps: '' }));
@@ -721,11 +730,16 @@ var server = http.createServer(function (req, res) {
       return;
     }
 
-    var stat2;
-    try { stat2 = fs.statSync(filePath); } catch (e) {
-      res.writeHead(404);
-      res.end('Not found');
-      return;
+    var fileSize;
+    try {
+      var sizeOut = execSync('stat -c %s ' + JSON.stringify(filePath), { timeout: 3000 });
+      fileSize = parseInt(sizeOut.toString().trim(), 10);
+    } catch (e) {
+      try { fileSize = fs.statSync(filePath).size; } catch (e2) {
+        res.writeHead(404);
+        res.end('Not found');
+        return;
+      }
     }
 
     var ext2 = getExt(filePath);
@@ -737,12 +751,12 @@ var server = http.createServer(function (req, res) {
     if (range) {
       var parts = range.replace(/bytes=/, '').split('-');
       var rangeStart = parseInt(parts[0], 10);
-      var rangeEnd = parts[1] ? parseInt(parts[1], 10) : stat2.size - 1;
-      if (rangeEnd >= stat2.size) rangeEnd = stat2.size - 1;
+      var rangeEnd = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+      if (rangeEnd >= fileSize) rangeEnd = fileSize - 1;
       var chunkSize = rangeEnd - rangeStart + 1;
       var stream = fs.createReadStream(filePath, { start: rangeStart, end: rangeEnd });
       res.writeHead(206, {
-        'Content-Range': 'bytes ' + rangeStart + '-' + rangeEnd + '/' + stat2.size,
+        'Content-Range': 'bytes ' + rangeStart + '-' + rangeEnd + '/' + fileSize,
         'Accept-Ranges': 'bytes',
         'Content-Length': chunkSize,
         'Content-Type': mime2,
@@ -752,7 +766,7 @@ var server = http.createServer(function (req, res) {
       stream.pipe(res);
     } else {
       res.writeHead(200, {
-        'Content-Length': stat2.size,
+        'Content-Length': fileSize,
         'Content-Type': mime2,
         'Accept-Ranges': 'bytes',
         'transferMode.dlna.org': 'Streaming',
