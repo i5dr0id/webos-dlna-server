@@ -73,7 +73,8 @@ function escXml(s) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function findUSBRoot() {
+function findUSBRoots() {
+  var roots = [];
   try {
     var drives = fs.readdirSync(USB_ROOT);
     for (var i = 0; i < drives.length; i++) {
@@ -86,13 +87,29 @@ function findUSBRoot() {
             var st = fs.statSync(pp);
             if (st.isDirectory()) {
               var contents = fs.readdirSync(pp);
-              if (contents.length > 0) return pp;
+              if (contents.length > 0) roots.push(pp);
             }
           } catch (e) {}
         }
       } catch (e) {}
     }
   } catch (e) {}
+  return roots;
+}
+
+function findUSBRoot() {
+  var roots = findUSBRoots();
+  return roots.length > 0 ? roots[0] : null;
+}
+
+function resolveIdToPath(id) {
+  var roots = findUSBRoots();
+  for (var i = 0; i < roots.length; i++) {
+    var p = idToPath(id, roots[i]);
+    if (p && p.indexOf(roots[i]) === 0) {
+      try { fs.statSync(p); return p; } catch (e) {}
+    }
+  }
   return null;
 }
 
@@ -173,7 +190,54 @@ function idToPath(id, usbRoot) {
 }
 
 function browseDirectChildren(objectID, start, count, usbRoot) {
-  var dirPath = idToPath(objectID, usbRoot);
+  // Root browse: list all USB partitions as top-level folders
+  if (objectID === '0') {
+    var roots = findUSBRoots();
+    var items = [];
+    for (var r = 0; r < roots.length; r++) {
+      var rp = roots[r];
+      var label = path.basename(rp);
+      // Use a partition-prefixed ID so we know which root it belongs to
+      var id = 'root:' + label;
+      items.push({
+        id: id, parentId: '0', title: label,
+        isDir: true, upnpClass: 'object.container.storageFolder'
+      });
+    }
+    var total = items.length;
+    if (count > 0) items = items.slice(start, start + count);
+    return { items: items, total: total };
+  }
+
+  // Resolve the right USB root from the object ID
+  var effectiveRoot = usbRoot;
+  var effectiveID = objectID;
+  if (objectID.indexOf('root:') === 0) {
+    var partName = objectID.substring(5);
+    var roots2 = findUSBRoots();
+    for (var r2 = 0; r2 < roots2.length; r2++) {
+      if (path.basename(roots2[r2]) === partName) {
+        effectiveRoot = roots2[r2];
+        effectiveID = '0';
+        break;
+      }
+    }
+  } else {
+    // Find which root this ID belongs to by trying each
+    var roots3 = findUSBRoots();
+    for (var r3 = 0; r3 < roots3.length; r3++) {
+      var resolved = idToPath(objectID, roots3[r3]);
+      if (resolved && resolved.indexOf(roots3[r3]) === 0) {
+        try {
+          fs.statSync(resolved);
+          effectiveRoot = roots3[r3];
+          break;
+        } catch (e) {}
+      }
+    }
+  }
+
+  var dirPath = effectiveID === '0' ? effectiveRoot : idToPath(effectiveID, effectiveRoot);
   if (!dirPath) return { items: [], total: 0 };
 
   var entries;
@@ -186,7 +250,7 @@ function browseDirectChildren(objectID, start, count, usbRoot) {
     var stat;
     try { stat = fs.statSync(fullPath); } catch (e) { continue; }
 
-    var id = pathToId(fullPath, usbRoot);
+    var id = pathToId(fullPath, effectiveRoot);
     var parentId = objectID;
 
     if (stat.isDirectory()) {
@@ -216,7 +280,7 @@ function browseDirectChildren(objectID, start, count, usbRoot) {
         if (subs.length) {
           item.subs = subs.map(function (s) {
             return {
-              url: BASE_URL + '/sub/' + encodeURIComponent(pathToId(s.path, usbRoot)),
+              url: BASE_URL + '/sub/' + encodeURIComponent(pathToId(s.path, effectiveRoot)),
               ext: s.ext,
               mime: s.mime,
               name: s.name
@@ -629,13 +693,9 @@ var server = http.createServer(function (req, res) {
 
   // Subtitle file serving
   if (pathname.indexOf('/sub/') === 0) {
-    var usbRootSub = findUSBRoot();
-    if (!usbRootSub) { res.writeHead(404); res.end('No USB'); return; }
     var subId = decodeURIComponent(pathname.substring(5));
-    var subPath = idToPath(subId, usbRootSub);
-    if (!subPath || subPath.indexOf(usbRootSub) !== 0) {
-      res.writeHead(403); res.end('Forbidden'); return;
-    }
+    var subPath = resolveIdToPath(subId);
+    if (!subPath) { res.writeHead(404); res.end('Not found'); return; }
     try {
       var subData = fs.readFileSync(subPath);
       var subExt = getExt(subPath);
@@ -653,14 +713,11 @@ var server = http.createServer(function (req, res) {
 
   // Media file streaming
   if (pathname.indexOf('/media/') === 0) {
-    var usbRoot2 = findUSBRoot();
-    if (!usbRoot2) { res.writeHead(404); res.end('No USB'); return; }
-
     var fileId = decodeURIComponent(pathname.substring(7));
-    var filePath = idToPath(fileId, usbRoot2);
-    if (!filePath || filePath.indexOf(usbRoot2) !== 0) {
-      res.writeHead(403);
-      res.end('Forbidden');
+    var filePath = resolveIdToPath(fileId);
+    if (!filePath) {
+      res.writeHead(404);
+      res.end('Not found');
       return;
     }
 
