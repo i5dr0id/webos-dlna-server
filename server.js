@@ -811,7 +811,8 @@ var server = http.createServer(function (req, res) {
       } else {
         var sh = spawn('sh', ['-c', 'dd if=' + JSON.stringify(filePath) + ' bs=65536 skip=' + rangeStart + ' iflag=skip_bytes 2>/dev/null | head -c ' + chunkSize], { stdio: ['ignore', 'pipe', 'ignore'] });
         sh.stdout.pipe(res);
-        res.on('close', function () { sh.kill(); });
+        sh.on('error', function () {});
+        req.on('close', function () { try { sh.kill('SIGTERM'); } catch (e) {} });
       }
     } else {
       res.writeHead(200, {
@@ -826,7 +827,8 @@ var server = http.createServer(function (req, res) {
       } else {
         var cat = spawn('cat', [filePath], { stdio: ['ignore', 'pipe', 'ignore'] });
         cat.stdout.pipe(res);
-        res.on('close', function () { cat.kill(); });
+        cat.on('error', function () {});
+        req.on('close', function () { try { cat.kill('SIGTERM'); } catch (e) {} });
       }
     }
     return;
