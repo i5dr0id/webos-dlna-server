@@ -621,22 +621,49 @@ var server = http.createServer(function (req, res) {
 
         if (args.BrowseFlag === 'BrowseMetadata') {
           var isRoot = objectID === '0';
-          var title;
-          if (isRoot) {
-            title = SERVER_NAME;
-          } else if (objectID.indexOf('root:') === 0) {
-            title = objectID.substring(5);
+          var isPartition = objectID.indexOf('root:') === 0;
+          var metaFilePath = (!isRoot && !isPartition) ? resolveIdToPath(objectID) : null;
+          var isFile = false;
+          var metaExt = metaFilePath ? getExt(metaFilePath) : '';
+          var metaClass = metaExt ? getUpnpClass(metaExt) : '';
+          if (metaClass) isFile = true;
+
+          var didl;
+          if (isFile) {
+            var metaMime = MIME_MAP[metaExt] || 'application/octet-stream';
+            var metaSize = 0;
+            try {
+              var mso = execSync('stat -c %s ' + JSON.stringify(metaFilePath), { timeout: 3000 });
+              metaSize = parseInt(mso.toString().trim(), 10) || 0;
+            } catch (e) {
+              try { metaSize = fs.statSync(metaFilePath).size; } catch (e2) {}
+            }
+            var metaFeatures = dlnaFeatures(metaMime);
+            var metaUrl = BASE_URL + '/media/' + encodeURIComponent(objectID);
+            didl = '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
+              + 'xmlns:dc="http://purl.org/dc/elements/1.1/" '
+              + 'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" '
+              + 'xmlns:sec="http://www.sec.co.kr/">'
+              + '<item id="' + escXml(objectID) + '" parentID="-1" restricted="1">'
+              + '<dc:title>' + escXml(path.basename(metaFilePath)) + '</dc:title>'
+              + '<upnp:class>' + metaClass + '</upnp:class>'
+              + '<res protocolInfo="http-get:*:' + metaMime + ':' + metaFeatures + '"'
+              + (metaSize ? ' size="' + metaSize + '"' : '')
+              + '>' + escXml(metaUrl) + '</res>'
+              + '</item></DIDL-Lite>';
           } else {
-            var metaPath = resolveIdToPath(objectID);
-            title = metaPath ? path.basename(metaPath) : objectID;
+            var title;
+            if (isRoot) title = SERVER_NAME;
+            else if (isPartition) title = objectID.substring(5);
+            else title = metaFilePath ? path.basename(metaFilePath) : objectID;
+            didl = '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
+              + 'xmlns:dc="http://purl.org/dc/elements/1.1/" '
+              + 'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">'
+              + '<container id="' + escXml(objectID) + '" parentID="-1" restricted="1">'
+              + '<dc:title>' + escXml(title) + '</dc:title>'
+              + '<upnp:class>object.container.storageFolder</upnp:class>'
+              + '</container></DIDL-Lite>';
           }
-          var didl = '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
-            + 'xmlns:dc="http://purl.org/dc/elements/1.1/" '
-            + 'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">'
-            + '<container id="' + escXml(objectID) + '" parentID="-1" restricted="1">'
-            + '<dc:title>' + escXml(title) + '</dc:title>'
-            + '<upnp:class>object.container.storageFolder</upnp:class>'
-            + '</container></DIDL-Lite>';
           var respXml = soapResponse('Browse', {
             Result: didl, NumberReturned: 1, TotalMatches: 1, UpdateID: 1
           });
