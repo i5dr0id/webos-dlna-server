@@ -17,6 +17,36 @@ ExFAT-formatted USB drives mounted via FUSE on rooted webOS TVs aren't recognize
 - **DLNA protocol info** — proper `DLNA.ORG_OP` and `DLNA.ORG_FLAGS` for player compatibility
 - **Auto USB detection** — scans `/tmp/usb` for mounted drives, handles drive letter changes on reconnect
 
+## Rust version (recommended)
+
+`rust/` contains a drop-in replacement written in Rust: a single ~450KB static binary using ~200KB of RAM, versus ~80MB for the Node.js server. Node.js 8 on 32-bit ARM can't open files larger than 2GB (nodejs/node#19455), so the Node server shells out to `dd`/`cat` for big files; the Rust server reads them natively.
+
+It also works around a Chrome 68 bug on 32-bit webOS: `Content-Length` is truncated to 32 bits, so a range response of exactly N×4GB looks empty and the player reports "This file cannot be recognised". Open-ended range requests (`bytes=N-`, N > 0) are capped at 2GB chunks; the player requests the next chunk automatically.
+
+Build (macOS, needs [rustup](https://rustup.rs) and the musl cross-linker):
+
+```sh
+rustup target add armv7-unknown-linux-musleabihf
+brew install messense/macos-cross-toolchains/armv7-unknown-linux-musleabihf
+cd rust && cargo build --release --target armv7-unknown-linux-musleabihf
+scp target/armv7-unknown-linux-musleabihf/release/dlna-server root@<TV_IP>:/media/developer/dlna-server/dlna-server-rs
+```
+
+Init script (`/var/lib/webosbrew/init.d/dlna-server`):
+
+```sh
+#!/bin/sh
+/media/developer/dlna-server/dlna-server-rs >> /tmp/dlna-server-rs.log 2>&1 &
+```
+
+The Rust version doesn't do ffprobe metadata yet.
+
+### Playback notes
+
+- **Dolby Vision Profile 7** (UHD Blu-ray REMUX "DV" releases) plays but jumping exits the player on this TV. Strip DV to HDR10 losslessly:
+  `ffmpeg -i in.mkv -map 0 -c copy -write_crc32 0 -bsf:v "dovi_rpu=strip=1,filter_units=remove_types=62|63" out.mkv`
+- Use `-write_crc32 0` whenever remuxing MKVs with ffmpeg for this TV. ffmpeg's default CRC-32 elements appear to stop the player from finding the seek index (still being verified).
+
 ## Requirements
 
 - Rooted LG webOS TV (tested on webOS 5.6.0, 55UN6800PVA)
