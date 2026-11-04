@@ -785,13 +785,26 @@ var server = http.createServer(function (req, res) {
 
     var ext2 = getExt(filePath);
     var mime2 = MIME_MAP[ext2] || 'application/octet-stream';
+    var features = dlnaFeatures(mime2);
+
+    // HEAD request — return headers only, no body
+    if (req.method === 'HEAD') {
+      res.writeHead(200, {
+        'Content-Length': fileSize,
+        'Content-Type': mime2,
+        'Accept-Ranges': 'bytes',
+        'transferMode.dlna.org': 'Streaming',
+        'contentFeatures.dlna.org': features
+      });
+      res.end();
+      return;
+    }
 
     // Check if Node can open this file (fails on >2GB files on this Node build)
     var canOpen = true;
     try { var testFd = fs.openSync(filePath, 'r'); fs.closeSync(testFd); } catch (e) { canOpen = false; }
 
     var range = req.headers.range;
-    var features = dlnaFeatures(mime2);
     if (range) {
       var parts = range.replace(/bytes=/, '').split('-');
       var rangeStart = parseInt(parts[0], 10);
@@ -809,7 +822,10 @@ var server = http.createServer(function (req, res) {
       if (canOpen) {
         fs.createReadStream(filePath, { start: rangeStart, end: rangeEnd }).pipe(res);
       } else {
-        var sh = spawn('sh', ['-c', 'dd if=' + JSON.stringify(filePath) + ' bs=65536 skip=' + rangeStart + ' iflag=skip_bytes 2>/dev/null | head -c ' + chunkSize], { stdio: ['ignore', 'pipe', 'ignore'] });
+        var openEnded = !parts[1] || rangeEnd === fileSize - 1;
+        var cmd = 'dd if=' + JSON.stringify(filePath) + ' bs=65536 skip=' + rangeStart + ' iflag=skip_bytes 2>/dev/null';
+        if (!openEnded) cmd += ' | head -c ' + chunkSize;
+        var sh = spawn('sh', ['-c', cmd], { stdio: ['ignore', 'pipe', 'ignore'] });
         sh.stdout.pipe(res);
         sh.on('error', function () {});
         req.on('close', function () { try { sh.kill('SIGTERM'); } catch (e) {} });
